@@ -5,10 +5,10 @@ import datetime
 import pickle
 import re
 import copy
+import psycopg2
+import db
 
 client = None
-keys = 'keys.data'
-storage = 'storage.data'
 
 async def secretary(bot, message):
   global client
@@ -18,8 +18,6 @@ async def secretary(bot, message):
   await command(message)
 
 async def command(message):
-  global keys, storage
-
   if message.content.startswith('!remindme'):
     res = re.search('!remindme (.*) (on|at|in) (.*)', message.content)
     try:
@@ -27,54 +25,36 @@ async def command(message):
       time = f'{res.group(2)} {res.group(3)}'
       date = dateparser.parse(time, settings={'PREFER_DATES_FROM': 'future'})
 
-      # Read data from file
-      reminders = await read_data(storage)
-      dates = await read_data(keys)
+      db.insert_reminder(message.author, reminder, date)
+      await client.send_message(message.channel, f':pen_fountain: I will remind you to `{reminder}` on {date.strftime("%d/%m/%y at %I:%M%p")}.')
 
-      key = (date, datetime.datetime.now())
-      reminders[key] = (message.author, reminder)
-      dates.append(key)
-      dates = sorted(dates, key=lambda x: x[0])
-
-      # Save data
-      await save_data(storage, reminders)
-      await save_data(keys, dates)
-
-      await client.send_message(message.channel, f':pen_fountain: I will remind you to `{reminder}` on {key[0].strftime("%d/%m/%y at %I:%M%p")}.')
-    except:
+    except Exception as e:
+      print(f'Error inserting: `{e}`')
       await error(message.channel)
   elif message.content.startswith('!purge'):
-    await save_data(storage, {})
-    await save_data(keys, [])
-
-    await client.send_message(message.channel, ':pen_fountain: All reminders cleared.')
+    try:
+      db.delete_all_reminders()
+      await client.send_message(message.channel, ':pen_fountain: All reminders cleared.')
+    except:
+      await db_error(message.channel)
   elif message.content.startswith('!list'):
     embed = discord.Embed(title=f'Reminders', color=0x888888)
 
-    reminders = await read_data(storage)
-    dates = await read_data(keys)
+    reminders = db.list_reminders()
 
-    for index, key in enumerate(dates):
-      embed.add_field(name=f'{index + 1}. {reminders[key][1]}', value=f'{key[0].strftime("%d/%m/%y - %I:%M%p")}', inline=False)
+    for index, reminder in enumerate(reminders):
+      embed.add_field(name=f'{index + 1}. {reminder[2]}', value=f'{reminder[3].strftime("%d/%m/%y - %I:%M%p")}', inline=False)
 
     await client.send_message(message.channel, embed=embed)
   elif message.content.startswith('!remove '):
     try:
-      index = int(message.content.split()[1]) - 1
+      index = str(int(message.content.split()[1]) - 1)
 
-      reminders = await read_data(storage)
-      dates = await read_data(keys)
-
-      key = dates[index]
-      reminder = copy.copy(reminders[key][1])
-      dates.remove(key)
-      del reminders[key]
-
-      await save_data(storage, reminders)
-      await save_data(keys, dates)
+      reminder = db.delete_reminder_by_row(index)
 
       await client.send_message(message.channel, f':pen_fountain: I will no longer remind you to `{reminder}`.')
-    except:
+    except Exception as e:
+      print(f'Error deleting: `{e}`')
       await error(message.channel)
   elif message.content.startswith('!help'):
     embed = discord.Embed(title=f'Commands', color=0x888888, description="""
@@ -95,39 +75,23 @@ async def command(message):
     await client.send_message(message.channel, "Use `!help` for more info.")
 
 async def check_reminders():
+  global client
+
   while True:
-    global keys, storage
-    reminders = await read_data(storage)
-    dates = await read_data(keys)
+    reminder = db.most_recent_reminder()
 
-    if len(dates) > 0:
-      key = dates[0]
+    if reminder is not None and reminder[3] <= datetime.datetime.now():
       try:
-        if key[0] <= datetime.datetime.now():
-          author = reminders[key][0]
-          reminder = reminders[key][1]
-          reminder_copy = copy.copy(reminder)
-
-          await client.send_message(author, f'Reminder: {reminder_copy}')
-
-          dates.remove(key)
-          del reminders[key]
-
-          await save_data(storage, reminders)
-          await save_data(keys, dates)
-      except:
+        result = db.delete_reminder_by_id(reminder[0])
+        member = discord.utils.get(client.get_all_members(), id=reminder[1])
+        await client.send_message(member, f'Reminder: {result[2]}')
+      except Exception as e:
+        print(f'Error sending reminder: {e}')
         continue
     await asyncio.sleep(1)
 
-async def read_data(file):
-  f = open(file, 'rb')
-  data = pickle.load(f)
-  return data
-
-async def save_data(file, data):
-  f = open(file, 'wb')
-  pickle.dump(data, f)
-  f.close()
-
 async def error(channel):
-  await client.send_message(channel, 'That was not a valid command. Please use `!help` for more info.')
+  await client.send_message(channel, 'Something went wrong or that was not a valid command. Please use `!help` for more info.')
+
+async def db_error(channel):
+  await client.send_message(channel, 'Something went wrong when attempting to track your reminder, please try again.')
