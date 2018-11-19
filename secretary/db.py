@@ -4,7 +4,6 @@ import psycopg2
 import datetime
 import copy
 from urllib.parse import urlparse
-import select
 
 """
 ## SCHEMA ##
